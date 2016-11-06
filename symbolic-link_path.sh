@@ -12,6 +12,7 @@ read_dir(){
 	for file in `ls $1 -A`; do	
 		if [ -d $1"/"$file ] && [ -d $2"/"$file ]; then
 		echo "have the same directory : $2"/"$file"
+			# recursion of function read_dir()
 			read_dir $1"/"$file $2"/"$file
 		elif [ -d $1"/"$file ] && [ ! -d $2"/"$file ]; then 
 		#soft link to directory	
@@ -84,7 +85,8 @@ read_dir(){
 	done
 }
 
-LINK_SUBDIR="bin etc lib sbin tools usr version webservice"
+#specify the dir to be symbolic-linked
+LINK_SUBDIR="bin etc lib sbin tools usr version webservice" 
 
 SRC_DIR=$1
 DST_DIR=$2
@@ -107,5 +109,6 @@ for i in ${LINK_SUBDIR}; do
 	fi
 	echo "----------------------------------------"
 done
+# other files to be symbolic-linked
 ln -sf /mnt/config/asterisk /etc/asterisk
 ln -sf /etc/asterisk/passwd /etc/passwd
