@@ -1,120 +1,200 @@
-/*******************************************************************************************************/
-* 	client recieve a struct from server by function recvfrom(), 
-*
-*
-/*******************************************************************************************************/
+/******************************************************************************************
+*	client: by get_local_ip() and get_local_mac() get the ip and mac of device,
+*	sendind struct Device_Info over UDP to server. 
+********************************************************************************************/
+#include <sys/ioctl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <net/if.h>
+#include <net/if_arp.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <string.h>
 #include <sys/select.h>
-#include <net/if.h>
-#include <net/if_arp.h>
 #include <errno.h>
-#include <sys/ioctl.h>
+#include <time.h>
+#include <netdb.h>
+#include <sys/vfs.h>
+#include <ifaddrs.h>
+#include <signal.h>
 
-#define BUFFER_LEN 64
+#define BUFFER_LEN 32
 #define IP_FOUND "IP_FOUND"
 #define IP_FOUND_ACK "ACK"
 #define IFNAME "eth0"
+#define MATCH_INFO "Analog"
 #define MCAST_PORT 8888
-/*************************************
-/
-/*****************************
-struct  Device_Info   					//Information of device
+
+/*
+** information of analog_gateway 
+*/
+struct Device_Info
 {
-    char device_ip[20];					
+    char device_ip[20];
     char device_num[8];
     char device_mac[20];
     char info[10];
 };
 
-int main()
+/*
+**	function: obtain the local mac of machine  
+**  return : local mac of machine 
+**
+*/
+char* get_local_mac(void)
+{ 
+	struct ifreq ifr;
+    char local_mac[18];
+	size_t if_name_len=strlen(IFNAME);
+	if (if_name_len<sizeof(ifr.ifr_name))
+	{
+		memcpy(ifr.ifr_name, IFNAME, if_name_len);
+		ifr.ifr_name[if_name_len]=0;
+	} 
+	else
+	{
+		printf("interface name is too long\n");
+	}
+	int fd=socket(AF_UNIX,SOCK_DGRAM,0);
+	if (fd==-1)
+	{
+		printf("%s\n",strerror(errno));
+	}
+	if (ioctl(fd,SIOCGIFHWADDR,&ifr)==-1) 
+	{
+		int temp_errno=errno;
+		close(fd);
+		printf("%s\n",strerror(temp_errno));
+	}
+	close(fd);
+	if (ifr.ifr_hwaddr.sa_family!=ARPHRD_ETHER)
+	{
+		printf("not an Ethernet interface\n");
+	}
+	
+	const unsigned char* mac=(unsigned char*)ifr.ifr_hwaddr.sa_data;
+	int n = sprintf(local_mac, "%02X:%02X:%02X:%02X:%02X:%02X",
+   	mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+	printf("local mac:%s count:%d", local_mac, n);
+
+	return local_mac;
+}
+
+/*
+**	function: obtain the local IP of machine  
+**  return : local IP of machine 
+**
+*/
+char* get_local_ip(void)
+{
+	struct ifreq ifr;
+	size_t if_name_len=strlen(IFNAME);
+	if (if_name_len<sizeof(ifr.ifr_name)) 
+	{
+		memcpy(ifr.ifr_name, IFNAME, if_name_len);
+		ifr.ifr_name[if_name_len]=0;
+	} 
+	else 
+	{
+        printf("interface name is too long\n");
+	}
+
+	int fd=socket(AF_INET,SOCK_DGRAM,0);
+	if (fd==-1)
+	{
+		printf("%s\n",strerror(errno));
+	}
+	if (ioctl(fd,SIOCGIFADDR,&ifr)==-1) 
+	{
+		int temp_errno=errno;
+		close(fd);
+		printf("%s\n",strerror(temp_errno));
+	}
+	close(fd);
+	struct sockaddr_in* ipaddr = (struct sockaddr_in*)&ifr.ifr_addr;
+	
+	return inet_ntoa(ipaddr->sin_addr);
+}
+
+int main(void *arg)
 {
     int ret = -1;
     int sock = -1;
+    struct Device_Info device;
+
+    struct sockaddr_in local_addr;
+    struct sockaddr_in from_addr;
+
+    int from_len = sizeof(struct sockaddr_in);
     int count = -1;
-    int from_len;
-    int so_broadcast = 1;
-    struct Device_Info *device;    
-
-    struct ifreq ifr;					//
-    struct sockaddr_in broadcast_addr;	// Local address
-    struct sockaddr_in from_addr;		// Server address
-    struct timeval timeout;
-
     fd_set readfd;
     char buff[BUFFER_LEN];
-
+    struct timeval timeout;
     timeout.tv_sec = 2;
     timeout.tv_usec = 0;
+    
+    memset(device.device_ip, 0, sizeof(device.device_ip));
+    memset(device.device_mac, 0, sizeof(device.device_mac));
+    memset(device.device_num, 0, sizeof(device.device_num));
+    memset(device.info, 0, sizeof(device.info));    
+ 
+    memcpy(device.device_ip, get_local_ip(), 20);
+    memcpy(device.device_mac, get_local_mac(), 20);
+    memcpy(device.device_num, "AG172", sizeof("AG172"));
+    memcpy(device.info, MATCH_INFO, sizeof(MATCH_INFO));
 
     sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if(sock < 0)
+    if( sock < 0 )
     {
-        printf("socket init error ...\n");
+        printf("socket init error!\n");
         return 0;
     }
-    strcpy(ifr.ifr_name, IFNAME);
+    memset((void*)&local_addr, 0, sizeof(struct sockaddr_in));
 
-    if(ioctl(sock, SIOCGIFBRDADDR, &ifr) == -1)
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    local_addr.sin_port = htons(MCAST_PORT);
+	/*
+	**	bind to the local address
+	*/
+    ret = bind(sock, (struct sockaddr*)&local_addr, sizeof(local_addr));
+    if(ret != 0)
     {
-        perror("ioctl error ...");
-        exit(1);
-    }
-    memcpy(&broadcast_addr, &ifr.ifr_broadaddr, sizeof(struct sockaddr_in));
-	
-	/* initiating a broadcast struct */	
-    broadcast_addr.sin_family = AF_INET;							//setting the type of address is AF_INET
-    broadcast_addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);		//setting ip is broadcast 
-    broadcast_addr.sin_port = htons(MCAST_PORT);					//setting the broadcast port
-
-	/* setting the file's type of sock is BROADCAST */
-    ret = setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &so_broadcast, sizeof(so_broadcast));		
-    if(ret == -1)
-    {
-        printf("Fail to set socket..\n ");
+        printf("bind error...\n");
         return 0;
     }
-    int times = 10;
-    int i = 0;
-    for(i = 0; i < times; i++)
-    {	
-		/*send a string to the Server */
-        ret = sendto(sock, IP_FOUND, strlen(IP_FOUND), 0, (struct sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
-        if( ret == -1)
-            continue;
+    while(1)
+    {
         FD_ZERO(&readfd);
         FD_SET(sock, &readfd);
+		
+		//checking whether the socket has recieved data packet form the server 
         ret = select(sock+1, &readfd, NULL, NULL, &timeout);
         switch(ret)
         {
             case -1:
-                printf("error!!\n");
                 break;
-            case 0:
-                printf("timeout ....\n");
+            case  0:	// timeout 
                 break;
             default:
-                if(FD_ISSET(sock, &readfd))				//
-                {   memset(buff, 0, BUFFER_LEN);
-                      count = recvfrom(sock, buff, BUFFER_LEN, 0, (struct sockaddr*)&from_addr, &from_len);
-                 //   count = recvfrom(sock, (struct Device_Info*)device, sizeof(*device), 0, (struct sockaddr*)&from_addr, &from_len);
-                    printf("count = %d \n", count);
-                    device = (struct Device_Info *)&buff;
-                    printf("match information :%s\n",device->info);
-                    printf("device ip :%s \n", device->device_ip);
-                    printf("device mac:%s\n", device->device_mac);
-                    printf("device num:%s\n", device->device_num);
-                    if(strstr(buff, IP_FOUND_ACK))
+                if( FD_ISSET( sock, &readfd ))
+                {
+        		    memset(buff, 0, BUFFER_LEN);
+                    count = recvfrom(sock, buff, BUFFER_LEN, 0, (struct sockaddr*)&local_addr, &from_len);
+                    if( strstr(buff, IP_FOUND))
                     {
-                        printf("found server, IP is %s\n",inet_ntoa(from_addr.sin_addr));
+						/*
+						**	sending the stuct to server 
+						*/
+                        count = sendto(sock, (struct Device_Info *)&device, sizeof(device), 0, (struct sockaddr*)&local_addr, from_len);
+						if(count < 0) 
+							return 0;
+						sleep(5);
                     }
-                break;
                 }
         }
     }
